@@ -3,118 +3,86 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 import httpx
 
 from config import TOKEN, PHONE_NUMBER_ID
-from languages import WELCOME_MENU, DISCLAIMER, change_language
+from languages import (
+    WELCOME_MENU_TEXT,
+    MAIN_MENU_TEXT,
+    DISCLAIMER,
+    set_language,
+    get_text,
+)
 from features.grok import ask_grok
 from features.pharmacies import handle_pharmacies
 from features.cycle import handle_cycle
 from utils import is_spam, update_last_used
 
-
 app = FastAPI()
-
-# In-memory state (single process only). Use Redis/DB if you run multiple workers.
-user_language: dict[str, str | None] = {}
-last_used: dict[str, float] = {}
-cycle_data: dict[str, dict] = {}  # per-sender cycle state
 
 VERIFY_TOKEN = "lafiyabot123"
 GRAPH_URL = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
 
+# In-memory state (OK single worker; pour scale multi-workers → Redis)
+user_language: dict[str, str | None] = {}
+last_used: dict[str, float] = {}
+cycle_data: dict[str, dict] = {}  # per-sender
+
+# IDs stables
+LANG_FR = "LANG_FR"
+LANG_EN = "LANG_EN"
+LANG_HA = "LANG_HA"
+MENU_LANG = "MENU_LANG"
+
+MENU_CYCLE = "MENU_CYCLE"
+MENU_PHARM = "MENU_PHARM"
+MENU_CLINIC = "MENU_CLINIC"
+MENU_URGENCY = "MENU_URGENCY"
+MENU_DOCTOR = "MENU_DOCTOR"
+
 
 def get_lang(sender: str) -> str:
-    lang = user_language.get(sender)
-    return lang if lang else "fr"
+    return user_language.get(sender) or "fr"
 
 
-def append_disclaimer(reply: str, lang: str) -> str:
-    disclaimer = DISCLAIMER.get(lang, DISCLAIMER.get("fr", ""))
-    return (reply or "") + disclaimer
+def append_disclaimer(text: str, lang: str) -> str:
+    d = DISCLAIMER.get(lang, DISCLAIMER.get("fr", ""))
+    return (text or "") + d
 
 
-def detect_language_choice(text_lower: str) -> str | None:
+def normalize(s: str) -> str:
+    return (s or "").strip()
+
+
+def extract_incoming(msg: dict) -> tuple[str, str]:
     """
-    Returns "1" for FR, "2" for EN, "3" for HA.
-    Uses exact matching to avoid false positives (e.g., dates/codes with digits).
-    Also supports deterministic interactive IDs: LANG_FR/LANG_EN/LANG_HA.
+    Returns (kind, content):
+      kind in {"text","interactive","other"}
+      content = body or interactive id/title (prefer id)
     """
-    tl = (text_lower or "").strip().lower()
+    msg_type = (msg.get("type") or "").lower().strip()
 
-    # Interactive IDs (recommended)
-    if tl in {"lang_fr", "langue_fr", "lang-fr", "fr_lang"}:
-        return "1"
-    if tl in {"lang_en", "langue_en", "lang-en", "en_lang"}:
-        return "2"
-    if tl in {"lang_ha", "langue_ha", "lang-ha", "ha_lang"}:
-        return "3"
-
-    # Text tokens (exact)
-    french_tokens = {"1", "fr", "français", "francais", "french"}
-    english_tokens = {"2", "en", "english", "anglais"}
-    hausa_tokens = {"3", "ha", "hausa"}
-
-    if tl in french_tokens:
-        return "1"
-    if tl in english_tokens:
-        return "2"
-    if tl in hausa_tokens:
-        return "3"
-
-    return None
-
-
-def is_language_menu_request(text_lower: str) -> bool:
-    tl = (text_lower or "").strip().lower()
-    return tl in {"langue", "language", "change langue", "change language", "menu_lang", "menu_language"}
-
-
-def extract_incoming_content(msg: dict) -> tuple[str, str, dict]:
-    """
-    Normalizes inbound WhatsApp messages.
-
-    Returns:
-      (content_type, content_text, meta)
-
-    content_type: "text" | "interactive" | "other"
-    content_text: a single string we can route on (prefer stable IDs)
-    meta: useful extracted metadata (id/title/type)
-    """
-    msg_type = (msg.get("type") or "").strip().lower()
-
-    # Plain text
     if msg_type == "text":
         body = (msg.get("text", {}).get("body") or "").strip()
-        return "text", body, {}
+        return "text", body
 
-    # Interactive responses (button / list)
     if msg_type == "interactive":
         inter = msg.get("interactive") or {}
-        inter_type = (inter.get("type") or "").strip().lower()
+        itype = (inter.get("type") or "").lower().strip()
 
-        # button_reply
-        if inter_type == "button_reply":
+        if itype == "button_reply":
             br = inter.get("button_reply") or {}
-            btn_id = (br.get("id") or "").strip()
-            title = (br.get("title") or "").strip()
-            # Prefer id if present; else fallback to title
-            chosen = btn_id if btn_id else title
-            return "interactive", chosen, {"interactive_type": "button_reply", "id": btn_id, "title": title}
+            # Prefer id
+            return "interactive", (br.get("id") or br.get("title") or "").strip()
 
-        # list_reply
-        if inter_type == "list_reply":
+        if itype == "list_reply":
             lr = inter.get("list_reply") or {}
-            item_id = (lr.get("id") or "").strip()
-            title = (lr.get("title") or "").strip()
-            chosen = item_id if item_id else title
-            return "interactive", chosen, {"interactive_type": "list_reply", "id": item_id, "title": title}
+            # Prefer id
+            return "interactive", (lr.get("id") or lr.get("title") or "").strip()
 
-        # Unknown interactive subtype
-        return "interactive", "", {"interactive_type": inter_type}
+        return "interactive", ""
 
-    # Other message types you may want to support later: image, audio, document, location, etc.
-    return "other", "", {"msg_type": msg_type}
+    return "other", ""
 
 
-async def send_whatsapp_message(to: str, body: str) -> None:
+async def wa_send_text(to: str, body: str) -> None:
     headers = {"Authorization": f"Bearer {TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
@@ -122,20 +90,103 @@ async def send_whatsapp_message(to: str, body: str) -> None:
         "type": "text",
         "text": {"body": body},
     }
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(GRAPH_URL, headers=headers, json=payload)
+        r.raise_for_status()
+
+
+async def wa_send_list_language(to: str) -> None:
+    """
+    Envoie le menu langue en LIST (recommandé).
+    """
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {"type": "text", "text": "LafiyaBot"},
+            "body": {"text": WELCOME_MENU_TEXT.get("fr")},  # corps neutre
+            "footer": {"text": "Choisis une langue / Choose a language"},
+            "action": {
+                "button": "Langues",
+                "sections": [
+                    {
+                        "title": "Langue",
+                        "rows": [
+                            {"id": LANG_FR, "title": "Français", "description": "Informations santé en français"},
+                            {"id": LANG_EN, "title": "English", "description": "Health info in simple English"},
+                            {"id": LANG_HA, "title": "Hausa", "description": "Bayanan lafiya a Hausa"},
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(GRAPH_URL, headers=headers, json=payload)
+        r.raise_for_status()
+
+
+async def wa_send_list_main_menu(to: str, lang: str) -> None:
+    """
+    Menu principal (options 4 à 8) en LIST.
+    """
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    body_text = MAIN_MENU_TEXT.get(lang, MAIN_MENU_TEXT["fr"])
+
+    rows = [
+        {"id": MENU_CYCLE, "title": get_text("menu_cycle", lang), "description": get_text("menu_cycle_desc", lang)},
+        {"id": MENU_PHARM, "title": get_text("menu_pharm", lang), "description": get_text("menu_pharm_desc", lang)},
+        {"id": MENU_CLINIC, "title": get_text("menu_clinic", lang), "description": get_text("menu_clinic_desc", lang)},
+        {"id": MENU_URGENCY, "title": get_text("menu_urgency", lang), "description": get_text("menu_urgency_desc", lang)},
+        {"id": MENU_DOCTOR, "title": get_text("menu_doctor", lang), "description": get_text("menu_doctor_desc", lang)},
+        {"id": MENU_LANG, "title": get_text("menu_lang", lang), "description": get_text("menu_lang_desc", lang)},
+    ]
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {"type": "text", "text": "LafiyaBot"},
+            "body": {"text": body_text},
+            "footer": {"text": get_text("menu_footer", lang)},
+            "action": {
+                "button": get_text("menu_button", lang),
+                "sections": [{"title": get_text("menu_title", lang), "rows": rows}],
+            },
+        },
+    }
 
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(GRAPH_URL, headers=headers, json=payload)
-        resp.raise_for_status()
+        r = await client.post(GRAPH_URL, headers=headers, json=payload)
+        r.raise_for_status()
+
+
+def is_language_text_choice(text_lower: str) -> str | None:
+    """
+    Support fallback texte: '1/2/3', 'fr', 'english', 'hausa', etc.
+    IMPORTANT: exact match only.
+    """
+    tl = (text_lower or "").strip().lower()
+    if tl in {"1", "fr", "français", "francais", "french"}:
+        return "fr"
+    if tl in {"2", "en", "english", "anglais"}:
+        return "en"
+    if tl in {"3", "ha", "hausa"}:
+        return "ha"
+    return None
 
 
 @app.get("/webhook")
 async def verify(request: Request):
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-
     if token == VERIFY_TOKEN and challenge is not None:
-        return PlainTextResponse(content=str(challenge), status_code=200)
-
+        return PlainTextResponse(str(challenge), status_code=200)
     raise HTTPException(status_code=403, detail="Wrong token")
 
 
@@ -149,8 +200,7 @@ async def webhook(request: Request):
 
     try:
         for entry in entries:
-            changes = entry.get("changes") or []
-            for change in changes:
+            for change in (entry.get("changes") or []):
                 value = change.get("value") or {}
                 messages = value.get("messages") or []
                 if not isinstance(messages, list):
@@ -161,74 +211,100 @@ async def webhook(request: Request):
                     if not sender:
                         continue
 
-                    # Anti-spam / rate limit
+                    # anti-spam
                     if is_spam(sender, last_used):
                         continue
                     update_last_used(sender, last_used)
 
-                    # Initialize sender state
+                    # init state
                     user_language.setdefault(sender, None)
                     cycle_data.setdefault(sender, {})
 
-                    content_type, content_text, meta = extract_incoming_content(msg)
-
-                    # If it's not text/interactive, ignore for now (no crash)
-                    if content_type not in {"text", "interactive"}:
+                    kind, content = extract_incoming(msg)
+                    if kind not in {"text", "interactive"}:
                         continue
 
-                    text_original = (content_text or "").strip()
+                    text_original = normalize(content)
                     if not text_original:
                         continue
-
                     text_lower = text_original.lower().strip()
 
-                    # === PRIORITY 1: Language selection ===
-                    choice = detect_language_choice(text_lower)
-                    if choice is not None:
-                        reply = change_language(choice, sender, user_language)
-                        lang = get_lang(sender)
-                        reply = append_disclaimer(reply, lang)
-                        await send_whatsapp_message(sender, reply)
+                    # ===== 1) ROUTAGE INTERACTIVE PAR IDs =====
+                    # Langues
+                    if text_original in {LANG_FR, LANG_EN, LANG_HA}:
+                        lang = {"LANG_FR": "fr", "LANG_EN": "en", "LANG_HA": "ha"}[text_original]
+                        set_language(sender, lang, user_language)
+                        await wa_send_list_main_menu(sender, lang)
                         continue
 
-                    # === Back to language menu ===
-                    if is_language_menu_request(text_lower):
-                        user_language.pop(sender, None)
-                        user_language.setdefault(sender, None)
-                        reply = append_disclaimer(WELCOME_MENU, "fr")
-                        await send_whatsapp_message(sender, reply)
+                    # Retour menu langue
+                    if text_original == MENU_LANG or text_lower in {"langue", "language", "change langue", "change language"}:
+                        user_language[sender] = None
+                        await wa_send_list_language(sender)
                         continue
 
-                    # === First contact (language not set yet) ===
+                    # Si langue non choisie → menu langue
                     if user_language.get(sender) is None:
-                        reply = append_disclaimer(WELCOME_MENU, "fr")
-                        await send_whatsapp_message(sender, reply)
+                        # fallback texte 1/2/3
+                        lang_choice = is_language_text_choice(text_lower)
+                        if lang_choice:
+                            set_language(sender, lang_choice, user_language)
+                            await wa_send_list_main_menu(sender, lang_choice)
+                        else:
+                            await wa_send_list_language(sender)
                         continue
 
-                    # Determine language
                     lang = get_lang(sender)
 
-                    # === Pharmacies de garde ===
+                    # ===== 2) ROUTAGE MENU PRINCIPAL (IDs) =====
+                    if text_original == MENU_CYCLE:
+                        # On peut soit afficher une aide, soit lancer handle_cycle avec une phrase guide
+                        hint = get_text("cycle_hint", lang)
+                        reply = append_disclaimer(hint, lang)
+                        await wa_send_text(sender, reply)
+                        continue
+
+                    if text_original == MENU_PHARM:
+                        hint = get_text("pharm_hint", lang)
+                        reply = append_disclaimer(hint, lang)
+                        await wa_send_text(sender, reply)
+                        continue
+
+                    if text_original == MENU_CLINIC:
+                        # Fonctionnalité en cours (placeholder propre)
+                        reply = append_disclaimer(get_text("clinic_placeholder", lang), lang)
+                        await wa_send_text(sender, reply)
+                        continue
+
+                    if text_original == MENU_URGENCY:
+                        reply = append_disclaimer(get_text("urgency_message", lang), lang)
+                        await wa_send_text(sender, reply)
+                        continue
+
+                    if text_original == MENU_DOCTOR:
+                        reply = append_disclaimer(get_text("doctor_placeholder", lang), lang)
+                        await wa_send_text(sender, reply)
+                        continue
+
+                    # ===== 3) ROUTAGE TEXTE LIBRE (features existantes) =====
                     if "pharmacie" in text_lower and "garde" in text_lower:
                         reply = handle_pharmacies(text_original, sender, user_language)
+                        reply = append_disclaimer(reply, lang)
+                        await wa_send_text(sender, reply)
+                        continue
 
-                    # === Cycle tracking ===
-                    elif any(word in text_lower for word in ["règle", "règles", "cycle", "retard", "période", "mens", "period"]):
-                        reply, updated = handle_cycle(
-                            text_original,
-                            sender,
-                            user_language,
-                            cycle_data.get(sender, {})
-                        )
-                        cycle_data[sender] = updated if isinstance(updated, dict) else cycle_data.get(sender, {})
+                    if any(w in text_lower for w in ["règle", "règles", "cycle", "retard", "période", "mens", "period"]):
+                        reply, updated = handle_cycle(text_original, sender, user_language, cycle_data.get(sender, {}))
+                        if isinstance(updated, dict):
+                            cycle_data[sender] = updated
+                        reply = append_disclaimer(reply, lang)
+                        await wa_send_text(sender, reply)
+                        continue
 
-                    # === Default: Grok ===
-                    else:
-                        reply = await ask_grok(text_original, lang)
-
-                    # Append disclaimer + send
+                    # défaut: Grok
+                    reply = await ask_grok(text_original, lang)
                     reply = append_disclaimer(reply, lang)
-                    await send_whatsapp_message(sender, reply)
+                    await wa_send_text(sender, reply)
 
     except httpx.HTTPStatusError as e:
         print("WhatsApp API error:", str(e))
