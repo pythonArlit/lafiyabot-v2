@@ -27,34 +27,41 @@ async def webhook(request: Request):
     try:
         for msg in data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", []):
             sender = msg["from"]
-            text = msg["text"]["body"].strip()
+            text_original = msg["text"]["body"].strip()  # Texte original pour Grok
+            text_lower = text_original.lower().strip()   # Version minuscule pour détection
 
             if is_spam(sender, last_used):
                 continue
             update_last_used(sender, last_used)
 
-            text_lower = text.lower().strip()
+            # Initialisation si premier contact
+            if sender not in user_language:
+                user_language[sender] = None
 
             # === PRIORITÉ 1 : CHOIX DE LANGUE (toujours en premier) ===
-            if text_lower in ["1", "2", "3", "fr", "français", "francais", "en", "english", "anglais", "ha", "hausa"]:
-                reply = change_language(text_lower, sender, user_language)
+            if any(k in text_lower for k in ["1", "français", "francais", "fr", "french"]):
+                reply = change_language("1", sender, user_language)
+            elif any(k in text_lower for k in ["2", "english", "anglais", "en"]):
+                reply = change_language("2", sender, user_language)
+            elif any(k in text_lower for k in ["3", "hausa", "ha"]):
+                reply = change_language("3", sender, user_language)
             # === RETOUR AU MENU LANGUE ===
-            elif text_lower in ["langue", "language", "change langue"]:
+            elif text_lower in ["langue", "language", "change langue", "change language"]:
                 user_language.pop(sender, None)
                 reply = WELCOME_MENU
             # === PREMIER MESSAGE ===
-            elif sender not in user_language:
+            elif user_language[sender] is None:
                 reply = WELCOME_MENU
             # === PHARMACIES DE GARDE ===
             elif "pharmacie" in text_lower and "garde" in text_lower:
-                reply = handle_pharmacies(text, sender, user_language)
+                reply = handle_pharmacies(text_original, sender, user_language)
             # === SUIVI DES RÈGLES ===
             elif any(word in text_lower for word in ["règle", "règles", "cycle", "retard", "période", "mens", "period"]):
-                reply, cycle_data = handle_cycle(text, sender, user_language, cycle_data)
-            # === RÉPONSE NORMALE ===
+                reply, cycle_data = handle_cycle(text_original, sender, user_language, cycle_data)
+            # === RÉPONSE NORMALE VIA GROK ===
             else:
                 langue = user_language.get(sender, "fr")
-                reply = await ask_grok(text, langue)
+                reply = await ask_grok(text_original, langue)
 
             reply += DISCLAIMER.get(user_language.get(sender, "fr"), DISCLAIMER["fr"])
 
