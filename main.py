@@ -11,9 +11,12 @@ GROK_KEY = os.getenv("GROK_KEY")
 
 last_used = {}
 user_language = {}
+user_in_menu = {}  # Pour savoir si l'utilisateur est dans le menu avancé
 
+# Disclaimer
 DISCLAIMER = "\n\nLafiyaBot ba likita ba ne · Bayani ne kawai · Idan kana jin ciwo mai tsanani, JE ASIBITI NAN TAKE"
 
+# Menu de bienvenue
 WELCOME_MENU = """Sannu ! Bienvenue ! Welcome ! 😊
 
 🇫🇷 Tapez *1* pour Français
@@ -22,36 +25,37 @@ WELCOME_MENU = """Sannu ! Bienvenue ! Welcome ! 😊
 
 (ou tapez 1, 2, 3 à tout moment pour changer)"""
 
+# Menu avancé après choix de langue
 MENU_PRINCIPAL = {
     "fr": """😊 Merci d'avoir choisi le français !
 
-Que voulez-vous faire ?
+Choisissez une option :
 
 1. Chat santé (questions générales)
 2. Pharmacies de garde
-3. Suivi des règles
-4. Centres de santé proches
+3. Gestion des menstruations
+4. Cliniques ou centres de santé proches
 5. Urgence médicale
-6. Contact avec un médecin
+6. Être mis en contact avec un médecin
 
-Tapez le numéro ou posez votre question.""",
+Tapez le numéro (1 à 6) ou posez votre question directement.""",
 
     "en": """😊 Thank you for choosing English!
 
-What do you want to do?
+Choose an option:
 
-1. Health chat
+1. Health chat (general questions)
 2. On-duty pharmacies
-3. Period tracking
-4. Nearby health centers
+3. Menstruation management
+4. Nearby clinics or health centers
 5. Medical emergency
-6. Contact a doctor
+6. Connect with a doctor
 
-Type the number or ask your question.""",
+Type the number (1 to 6) or ask directly.""",
 
     "ha": """😊 Na gode da zaɓin Hausa!
 
-Menene kake so ka yi?
+Zaɓi zaɓi:
 
 1. Magana game da lafiya
 2. Magungunan gadi
@@ -60,7 +64,7 @@ Menene kake so ka yi?
 5. Gaggawa ta lafiya
 6. Sadarwa da likita
 
-Rubuta lamba ko tambaya kai tsaye."""
+Rubuta lamba (1 zuwa 6) ko tambaya kai tsaye."""
 }
 
 async def ask_grok(text: str) -> str:
@@ -69,15 +73,20 @@ async def ask_grok(text: str) -> str:
             r = await client.post(
                 "https://api.x.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"},
-                json={"model":"grok-3","messages":[
-                    {"role":"system","content":"Ka amsa a harshen Hausa na Kano da kyau da takaice."},
-                    {"role":"user","content":text}
-                ],"temperature":0.7}
+                json={
+                    "model": "grok-3",
+                    "messages": [
+                        {"role": "system", "content": "Réponds en français, anglais ou hausa selon le choix de l'utilisateur. Sois clair et poli."},
+                        {"role": "user", "content": text}
+                    ],
+                    "temperature": 0.7
+                }
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
-        except:
-            return "Na ji tambayarka, za mu ba ka amsa nan take."
+        except Exception as e:
+            print("Erreur Grok:", e)
+            return "Je n’ai pas pu répondre pour le moment. Réessayez."
 
 @app.get("/webhook")
 async def verify(r: Request):
@@ -90,6 +99,7 @@ async def receive(r: Request):
     data = await r.json()
     print("Message →", data)
     try:
+        # Ligne corrigée : parenthèses équilibrées
         for msg in data.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", []):
             sender = msg["from"]
             text = msg["text"]["body"].strip()
@@ -104,26 +114,50 @@ async def receive(r: Request):
 
             text_lower = text.lower()
 
-            # === CHOIX DE LANGUE (priorité absolue) ===
-            if text_lower in ["1", "français", "francais", "fr"]:
+            # === CHOIX DE LANGUE (priorité maximale) ===
+            if text_lower in ["1", "français", "francais", "fr", "french"]:
                 user_language[sender] = "fr"
                 reply = MENU_PRINCIPAL["fr"]
+                user_in_menu[sender] = True
             elif text_lower in ["2", "english", "anglais", "en"]:
                 user_language[sender] = "en"
                 reply = MENU_PRINCIPAL["en"]
+                user_in_menu[sender] = True
             elif text_lower in ["3", "hausa", "ha"]:
                 user_language[sender] = "ha"
                 reply = MENU_PRINCIPAL["ha"]
+                user_in_menu[sender] = True
             # === RETOUR AU MENU ===
             elif text_lower in ["menu", "m"]:
-                if sender in user_language:
-                    reply = MENU_PRINCIPAL[user_language[sender]]
-                else:
-                    reply = WELCOME_MENU
+                reply = MENU_PRINCIPAL.get(user_language.get(sender, "fr"), MENU_PRINCIPAL["fr"])
+                user_in_menu[sender] = True
             # === PREMIER MESSAGE ===
             elif sender not in user_language:
                 reply = WELCOME_MENU
-            # === RÉPONSE NORMALE ===
+            # === MENU AVANCÉ ===
+            elif user_in_menu.get(sender, False):
+                choix = text.strip()
+                if choix == "1":
+                    reply = "Posez-moi votre question santé !"
+                    user_in_menu[sender] = False
+                elif choix == "2":
+                    reply = "Fonctionnalité pharmacies de garde en cours de développement."
+                    user_in_menu[sender] = False
+                elif choix == "3":
+                    reply = "Fonctionnalité suivi menstruations en cours de développement."
+                    user_in_menu[sender] = False
+                elif choix == "4":
+                    reply = "Envoyez-moi votre ville pour trouver les centres proches."
+                    user_in_menu[sender] = False
+                elif choix == "5":
+                    reply = "URGENCE : Appelez le 15 (Niger) ou 112 immédiatement.\nDites-moi vos symptômes pour des conseils."
+                    user_in_menu[sender] = False
+                elif choix == "6":
+                    reply = "Service en développement. Bientôt disponible !"
+                    user_in_menu[sender] = False
+                else:
+                    reply = "Choisissez un numéro de 1 à 6 ou tapez 'menu'."
+            # === CHAT NORMAL ===
             else:
                 reply = await ask_grok(text)
 
