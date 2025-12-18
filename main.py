@@ -108,7 +108,7 @@ async def wa_send_list_language(to: str) -> None:
             "type": "list",
             "header": {"type": "text", "text": "LafiyaBot"},
             "body": {"text": WELCOME_MENU_TEXT.get("fr")},  # corps neutre
-            "footer": {"text": "Choisis une langue / Choose a language"},
+            "footer": {"text": "Choisis une langue / Choose a language / Zabi harshen ka"},
             "action": {
                 "button": "Langues",
                 "sections": [
