@@ -4,7 +4,7 @@ import httpx
 import json
 
 from config import TOKEN, PHONE_NUMBER_ID
-from languages import WELCOME_MENU, DISCLAIMER, change_language  # adapte si besoin
+from languages import WELCOME_MENU, DISCLAIMER
 from features.grok import ask_grok
 from features.pharmacies import handle_pharmacies
 from features.cycle import handle_cycle
@@ -19,14 +19,14 @@ VERIFY_TOKEN = "lafiyabot123"
 GRAPH_URL = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
 
 DEBUG = True
-DISABLE_SPAM = False  # mets True pour tester sans blocage anti-spam
+DISABLE_SPAM = False  # set True temporarily for debugging
 
 # =========================
 # STATE (in-memory)
 # =========================
 user_language: dict[str, str | None] = {}
 last_used: dict[str, float] = {}
-cycle_data: dict[str, dict] = {}  # par utilisateur
+cycle_data: dict[str, dict] = {}  # per user
 
 # =========================
 # STABLE IDs
@@ -34,8 +34,10 @@ cycle_data: dict[str, dict] = {}  # par utilisateur
 LANG_FR = "LANG_FR"
 LANG_EN = "LANG_EN"
 LANG_HA = "LANG_HA"
+
 MENU_LANG = "MENU_LANG"
 
+MENU_CHAT_MEDICAL = "MENU_CHAT_MEDICAL"  # NEW (top of menu)
 MENU_CYCLE = "MENU_CYCLE"
 MENU_PHARM = "MENU_PHARM"
 MENU_CLINIC = "MENU_CLINIC"
@@ -63,7 +65,7 @@ def normalize(s: str) -> str:
 
 def is_language_text_choice(text_lower: str) -> str | None:
     """
-    Fallback texte: exact match only (évite les faux positifs).
+    Fallback language selection by text. Exact match only.
     """
     tl = (text_lower or "").strip().lower()
     if tl in {"1", "fr", "français", "francais", "french"}:
@@ -122,7 +124,8 @@ async def wa_send_text(to: str, body: str) -> None:
 
 async def wa_send_list_language(to: str) -> None:
     """
-    Menu langue en LIST.
+    Language menu (LIST).
+    Uses ASCII-only to avoid WhatsApp strict validation edge cases.
     """
     headers = {"Authorization": f"Bearer {TOKEN}"}
 
@@ -132,14 +135,14 @@ async def wa_send_list_language(to: str) -> None:
         "type": "interactive",
         "interactive": {
             "type": "list",
-            "body": {"text": "Bienvenue sur LafiyaBot. Choisis une langue / Choose a language."},
+            "body": {"text": "Welcome to LafiyaBot. Choose a language / Choisis une langue."},
             "action": {
-                "button": "Langues",
+                "button": "Languages",
                 "sections": [
                     {
-                        "title": "Langue",
+                        "title": "Language",
                         "rows": [
-                            {"id": LANG_FR, "title": "Français", "description": "Infos santé en français"},
+                            {"id": LANG_FR, "title": "Francais", "description": "Infos sante en francais"},
                             {"id": LANG_EN, "title": "English", "description": "Health info in English"},
                             {"id": LANG_HA, "title": "Hausa", "description": "Bayanan lafiya a Hausa"},
                         ],
@@ -154,8 +157,8 @@ async def wa_send_list_language(to: str) -> None:
         log("LANG_LIST status:", r.status_code)
         if r.status_code >= 400:
             log("LANG_LIST error:", r.text)
-            # fallback texte si besoin
-            fallback = WELCOME_MENU if isinstance(WELCOME_MENU, str) else WELCOME_MENU.get("fr", "")
+            # Fallback text
+            fallback = WELCOME_MENU["fr"] if isinstance(WELCOME_MENU, dict) else str(WELCOME_MENU)
             await wa_send_text(to, fallback)
             return
         r.raise_for_status()
@@ -163,7 +166,8 @@ async def wa_send_list_language(to: str) -> None:
 
 async def wa_send_list_main_menu(to: str, lang: str) -> None:
     """
-    Menu principal LIST - version strict + logs + fallback texte.
+    Main menu (LIST) - strict payload + logs + text fallback.
+    Includes NEW 'Medical chat' at top.
     """
     headers = {"Authorization": f"Bearer {TOKEN}"}
 
@@ -172,39 +176,43 @@ async def wa_send_list_main_menu(to: str, lang: str) -> None:
         button_text = "Menu"
         section_title = "Options"
         rows = [
-            {"id": MENU_CYCLE,   "title": "Cycle / period",      "description": "Next period, delay"},
-            {"id": MENU_PHARM,   "title": "Duty pharmacies",     "description": "Find nearby pharmacy"},
-            {"id": MENU_CLINIC,  "title": "Nearby clinics",      "description": "Health facilities"},
-            {"id": MENU_URGENCY, "title": "Emergency",           "description": "Warning signs"},
-            {"id": MENU_DOCTOR,  "title": "Contact a doctor",    "description": "Feature in progress"},
-            {"id": MENU_LANG,    "title": "Change language",     "description": "FR/EN/HA"},
+            {"id": MENU_CHAT_MEDICAL, "title": "Medical chat",      "description": "Ask a health question"},
+            {"id": MENU_CYCLE,        "title": "Cycle / period",     "description": "Next period, delay"},
+            {"id": MENU_PHARM,        "title": "Duty pharmacies",    "description": "Find nearby pharmacy"},
+            {"id": MENU_CLINIC,       "title": "Nearby clinics",     "description": "Health facilities"},
+            {"id": MENU_URGENCY,      "title": "Emergency",          "description": "Warning signs"},
+            {"id": MENU_DOCTOR,       "title": "Contact a doctor",   "description": "Feature in progress"},
+            {"id": MENU_LANG,         "title": "Change language",    "description": "FR / EN / HA"},
         ]
     elif lang == "ha":
+        # ASCII-only Hausa for interactive list stability
         body_text = "Babban menu. Zabi abin da kake so."
         button_text = "Menu"
         section_title = "Zabuka"
         rows = [
-            {"id": MENU_CYCLE,   "title": "Haila / cycle",       "description": "Ranar gaba, jinkiri"},
-            {"id": MENU_PHARM,   "title": "Pharmacy na gaggawa", "description": "Nemo kusa"},
-            {"id": MENU_CLINIC,  "title": "Asibitoci kusa",      "description": "Cibiyoyin lafiya"},
-            {"id": MENU_URGENCY, "title": "Gaggawa",             "description": "Alamun hadari"},
-            {"id": MENU_DOCTOR,  "title": "Tuntuɓi likita",      "description": "Ana shirya"},
-            {"id": MENU_LANG,    "title": "Canza yare",          "description": "FR/EN/HA"},
+            {"id": MENU_CHAT_MEDICAL, "title": "Tattaunawar lafiya", "description": "Tambayi matsalar lafiya"},
+            {"id": MENU_CYCLE,        "title": "Haila / cycle",      "description": "Ranar gaba, jinkiri"},
+            {"id": MENU_PHARM,        "title": "Pharmacy na gaggawa","description": "Nemo kusa"},
+            {"id": MENU_CLINIC,       "title": "Asibitoci kusa",     "description": "Cibiyoyin lafiya"},
+            {"id": MENU_URGENCY,      "title": "Gaggawa",            "description": "Alamun hadari"},
+            {"id": MENU_DOCTOR,       "title": "Tuntubi likita",     "description": "Ana shiryawa"},
+            {"id": MENU_LANG,         "title": "Canza yare",         "description": "FR / EN / HA"},
         ]
     else:
         body_text = "Menu principal. Choisis une option."
         button_text = "Menu"
         section_title = "Options"
         rows = [
-            {"id": MENU_CYCLE,   "title": "Cycle / règles",      "description": "Prochaines règles, retard"},
-            {"id": MENU_PHARM,   "title": "Pharmacies de garde", "description": "Trouver une pharmacie"},
-            {"id": MENU_CLINIC,  "title": "Cliniques proches",   "description": "Centres de santé"},
-            {"id": MENU_URGENCY, "title": "Urgence",             "description": "Signes d’alerte"},
-            {"id": MENU_DOCTOR,  "title": "Contacter médecin",   "description": "Fonction en cours"},
-            {"id": MENU_LANG,    "title": "Changer de langue",   "description": "FR/EN/HA"},
+            {"id": MENU_CHAT_MEDICAL, "title": "Chat medical",        "description": "Poser une question sante"},
+            {"id": MENU_CYCLE,        "title": "Cycle / regles",      "description": "Prochaines regles, retard"},
+            {"id": MENU_PHARM,        "title": "Pharmacies de garde", "description": "Trouver une pharmacie"},
+            {"id": MENU_CLINIC,       "title": "Cliniques proches",   "description": "Centres de sante"},
+            {"id": MENU_URGENCY,      "title": "Urgence",            "description": "Signes d'alerte"},
+            {"id": MENU_DOCTOR,       "title": "Contacter medecin",   "description": "Fonction en cours"},
+            {"id": MENU_LANG,         "title": "Changer de langue",  "description": "FR / EN / HA"},
         ]
 
-    # Enforcement: title <= 24, description <= 72, non-empty
+    # Enforce WhatsApp constraints: title <= 24, description <= 72, non-empty
     safe_rows = []
     for r in rows:
         title = (r.get("title") or "").strip()[:24] or "Option"
@@ -219,9 +227,9 @@ async def wa_send_list_main_menu(to: str, lang: str) -> None:
             "type": "list",
             "body": {"text": body_text[:1024]},
             "action": {
-                "button": button_text[:20] or "Menu",
+                "button": (button_text[:20] or "Menu"),
                 "sections": [
-                    {"title": section_title[:24] or "Options", "rows": safe_rows}
+                    {"title": (section_title[:24] or "Options"), "rows": safe_rows}
                 ],
             },
         },
@@ -233,21 +241,23 @@ async def wa_send_list_main_menu(to: str, lang: str) -> None:
         if r.status_code >= 400:
             log("MAIN_MENU error:", r.text)
 
-        # Fallback texte si Meta rejette l'interactive
+        # Text fallback if interactive fails
         if r.status_code >= 400:
             fallback = {
                 "fr": (
                     "Menu:\n"
-                    "4) Cycle / règles\n"
+                    "0) Chat medical\n"
+                    "4) Cycle / regles\n"
                     "5) Pharmacies de garde\n"
                     "6) Cliniques proches\n"
                     "7) Urgence\n"
-                    "8) Contacter médecin\n"
+                    "8) Contacter medecin\n"
                     "Tape 'langue' pour changer."
                 ),
                 "en": (
                     "Menu:\n"
-                    "4) Period / cycle\n"
+                    "0) Medical chat\n"
+                    "4) Cycle / period\n"
                     "5) Duty pharmacies\n"
                     "6) Nearby clinics\n"
                     "7) Emergency\n"
@@ -256,11 +266,12 @@ async def wa_send_list_main_menu(to: str, lang: str) -> None:
                 ),
                 "ha": (
                     "Menu:\n"
+                    "0) Tattaunawar lafiya\n"
                     "4) Haila / cycle\n"
                     "5) Pharmacy na gaggawa\n"
                     "6) Asibitoci kusa\n"
                     "7) Gaggawa\n"
-                    "8) Tuntuɓi likita\n"
+                    "8) Tuntubi likita\n"
                     "Rubuta 'langue' don canza yare."
                 ),
             }.get(lang, "")
@@ -333,10 +344,7 @@ async def webhook(request: Request):
                     # =========================
                     if text_original in {LANG_FR, LANG_EN, LANG_HA}:
                         lang = {LANG_FR: "fr", LANG_EN: "en", LANG_HA: "ha"}[text_original]
-                        # utilise ta fonction existante si tu veux (change_language)
                         user_language[sender] = lang
-
-                        # Envoie menu principal immédiatement
                         await wa_send_list_main_menu(sender, lang)
                         continue
 
@@ -352,7 +360,6 @@ async def webhook(request: Request):
                     # 3) First contact (language not set)
                     # =========================
                     if user_language.get(sender) is None:
-                        # fallback texte 1/2/3
                         lang_choice = is_language_text_choice(text_lower)
                         if lang_choice:
                             user_language[sender] = lang_choice
@@ -362,13 +369,43 @@ async def webhook(request: Request):
                         continue
 
                     # =========================
-                    # 4) Menu principal routing by IDs
+                    # 4) Menu routing by IDs
                     # =========================
                     lang = get_lang(sender)
 
+                    if text_original == MENU_CHAT_MEDICAL:
+                        msg_txt = {
+                            "fr": (
+                                "Chat medical\n\n"
+                                "Decris ton probleme de sante avec tes propres mots.\n"
+                                "Exemples:\n"
+                                "- J'ai mal au ventre depuis 2 jours\n"
+                                "- Mon enfant a de la fievre\n"
+                                "- J'ai des vertiges\n"
+                            ),
+                            "en": (
+                                "Medical chat\n\n"
+                                "Describe your health problem in your own words.\n"
+                                "Examples:\n"
+                                "- I have stomach pain for 2 days\n"
+                                "- My child has fever\n"
+                                "- I feel dizzy\n"
+                            ),
+                            "ha": (
+                                "Tattaunawar lafiya\n\n"
+                                "Bayyana matsalar lafiyarka da kalamanka.\n"
+                                "Misalai:\n"
+                                "- Ciwon ciki tun kwana biyu\n"
+                                "- Yaro na da zazzabi\n"
+                                "- Ina jin jiri\n"
+                            ),
+                        }.get(lang, "")
+                        await wa_send_text(sender, append_disclaimer(msg_txt, lang))
+                        continue
+
                     if text_original == MENU_CYCLE:
                         hint = {
-                            "fr": "Écris par exemple: 'mes règles ont commencé le 12/12' ou 'retard de 5 jours'.",
+                            "fr": "Ecris par exemple: 'mes regles ont commence le 12/12' ou 'retard de 5 jours'.",
                             "en": "Try: 'my period started 12/12' or '5 days late'.",
                             "ha": "Rubuta: 'haila ta fara 12/12' ko 'jinkiri kwana 5'.",
                         }.get(lang, "")
@@ -377,7 +414,7 @@ async def webhook(request: Request):
 
                     if text_original == MENU_PHARM:
                         hint = {
-                            "fr": "Écris: 'pharmacie de garde + ville' (ex: pharmacie de garde Niamey).",
+                            "fr": "Ecris: 'pharmacie de garde + ville' (ex: pharmacie de garde Niamey).",
                             "en": "Type: 'duty pharmacy + city' (e.g., duty pharmacy Niamey).",
                             "ha": "Rubuta: 'pharmacy na gaggawa + gari' (misali: Niamey).",
                         }.get(lang, "")
@@ -386,7 +423,7 @@ async def webhook(request: Request):
 
                     if text_original == MENU_CLINIC:
                         msg_txt = {
-                            "fr": "Cliniques proches : fonctionnalité en cours. Dis-moi ta ville.",
+                            "fr": "Cliniques proches : fonctionnalite en cours. Dis-moi ta ville.",
                             "en": "Nearby clinics: in progress. Tell me your city.",
                             "ha": "Asibitoci kusa: ana aiki. Fadi garinka.",
                         }.get(lang, "")
@@ -395,7 +432,7 @@ async def webhook(request: Request):
 
                     if text_original == MENU_URGENCY:
                         msg_txt = {
-                            "fr": "URGENCE : douleur thoracique, difficulté à respirer, convulsions, saignement important, perte de conscience — va au centre de santé immédiatement.",
+                            "fr": "URGENCE : douleur thoracique, difficulte a respirer, convulsions, saignement important, perte de connaissance — va au centre de sante immediatement.",
                             "en": "EMERGENCY: chest pain, breathing difficulty, seizures, heavy bleeding, fainting — go to a health facility immediately.",
                             "ha": "GAGGAWA: ciwon kirji, wahalar numfashi, kamu, zubar jini mai yawa, suma — je asibiti nan da nan.",
                         }.get(lang, "")
@@ -404,9 +441,9 @@ async def webhook(request: Request):
 
                     if text_original == MENU_DOCTOR:
                         msg_txt = {
-                            "fr": "Contact médecin : en cours (partenaires). En attendant, décris tes symptômes.",
+                            "fr": "Contact medecin : en cours (partenaires). En attendant, decris tes symptomes.",
                             "en": "Doctor contact: in progress. For now, describe your symptoms.",
-                            "ha": "Tuntuɓar likita: ana shirya. A yanzu, bayyana alamunka.",
+                            "ha": "Tuntubar likita: ana shiryawa. A yanzu, bayyana alamunka.",
                         }.get(lang, "")
                         await wa_send_text(sender, append_disclaimer(msg_txt, lang))
                         continue
